@@ -368,6 +368,19 @@ mod tests {
         ]
     }
 
+    /// Deterministic full-rank matrix used to compare against scikit-learn.
+    ///
+    /// Every entry is a small integer, so the fixture is bit-for-bit reproducible in any language
+    /// and the reference values can be regenerated from
+    /// `[[float((i * 7 + j * 13) % 11) for j in range(6)] for i in range(30)]`.
+    ///
+    /// It is deliberately larger than the other fixtures here: the solver defaults to
+    /// `2 * n_samples` iterations, so it does not converge well enough on very small inputs to
+    /// reproduce reference values.
+    fn reference_matrix() -> Array2<f64> {
+        Array2::from_shape_fn((30, 6), |(i, j)| ((i * 7 + j * 13) % 11) as f64)
+    }
+
     /// Frobenius norm of the difference between `X` and its rank-`k` reconstruction.
     fn reconstruction_error(x: &Array2<f64>, k: usize) -> f64 {
         let dataset = Dataset::from(x.clone());
@@ -724,6 +737,76 @@ mod tests {
 
         assert_eq!(model.components().nrows(), 4);
         assert_abs_diff_eq!(model.explained_variance_ratio().sum(), 1.0, epsilon = 1e-7);
+    }
+
+    /// Compare every learned quantity against scikit-learn's `TruncatedSVD`.
+    ///
+    /// The reference values were produced by scikit-learn 1.5.2 with
+    /// `TruncatedSVD(n_components=3, algorithm="arpack")` on [`reference_matrix`], and
+    /// independently reproduced from `numpy.linalg.svd` plus the documented variance formulas.
+    #[test]
+    fn test_matches_scikit_learn() {
+        let model = TruncatedSvd::params(3)
+            .fit(&Dataset::from(reference_matrix()))
+            .unwrap();
+
+        assert_abs_diff_eq!(
+            model.singular_values(),
+            &array![67.409442111200, 25.301101305598, 23.976151993122],
+            epsilon = 1e-6
+        );
+        assert_abs_diff_eq!(
+            model.explained_variance(),
+            &array![1.781289762736, 21.282358946708, 19.160436185523],
+            epsilon = 1e-6
+        );
+        assert_abs_diff_eq!(
+            model.explained_variance_ratio(),
+            array![0.029710720852, 0.354975500881, 0.319583249633],
+            epsilon = 1e-6
+        );
+        // the sign of a singular vector is arbitrary, so the components are compared by magnitude
+        assert_abs_diff_eq!(
+            model.components().mapv(f64::abs),
+            array![
+                [
+                    0.423969864353,
+                    0.392194236319,
+                    0.402632149197,
+                    0.386062226296,
+                    0.409987986001,
+                    0.432650432005
+                ],
+                [
+                    0.417160863970,
+                    0.256828707224,
+                    0.594604739140,
+                    0.337609404353,
+                    0.176780937659,
+                    0.511106078111
+                ],
+                [
+                    0.334215776150,
+                    0.550226558016,
+                    0.147228776588,
+                    0.525070260688,
+                    0.536643283659,
+                    0.013763888089
+                ]
+            ],
+            epsilon = 1e-6
+        );
+
+        // The leading singular direction tracks how far the data sits from the origin, so it
+        // explains almost none of the variance: the explained variance is *not* ordered like the
+        // singular values. Any implementation that derives it from the spectrum alone can only
+        // produce a decreasing sequence, so this single comparison rules that route out.
+        let ev = model.explained_variance();
+        assert!(
+            ev[0] < ev[1],
+            "explained variance must not inherit the singular-value ordering: {}",
+            ev
+        );
     }
 
     /// Unseen observations are projected with the learned components and nothing else.
